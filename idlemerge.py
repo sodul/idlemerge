@@ -21,8 +21,10 @@ import os
 import re
 import select
 import shutil
+import smtplib
 import subprocess
 import sys
+import types
 import xml.etree.ElementTree
 from optparse import OptionParser
 
@@ -91,7 +93,15 @@ DEFAULT_NO_MERGE_PATTERNS = (
 class Error(Exception):
     pass
 
+
+def force_line_buffer():
+    if hasattr(sys.stdout, 'fileno'):
+        # Force stdout to be line-buffered
+        sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 1)
+
+
 class Conflict(Error):
+    """Class to handle merge conflicts exceptions."""
 
     def __init__(
         self, revision, mergeinfos=None, merges=None, message=None, source=None, target=None):
@@ -102,17 +112,36 @@ class Conflict(Error):
         self.source = source
         self.target = target
         self._message = message
+        self._status = None
 
     def __str__(self):
         message_lines = [self._message] if self._message else []
-        message_lines.append('MANUAL MERGE NEEDS TO BE DONE: revision %s by %s from %s' % (
-            self.revision, self.revision.author, self.source))
+        message_lines.append(self.subject)
         if self.mergeinfos:
             message_lines.append(
                 'Pending record-only merges: ' + revisions_as_string(self.mergeinfos))
         if self.merges:
             message_lines.append('Pending clean merges: ' + revisions_as_string(self.merges))
-        return '\n'.join(message_lines)
+        return '\n'.join(message_lines + self.status)
+
+    @property
+    def status(self):
+        if self._status is None:
+            status_lines = execute_command(['svn', 'status'])['stdout']
+            meta_lines = []
+            other_lines = []
+            for line in status_lines:
+                if re.match(r'\s?\S{1,2}\s+', line):
+                    meta_lines.append(line.rstrip())
+                else:
+                    other_lines.append(line.rstrip())
+            self._status = sorted(meta_lines) + other_lines
+        return self._status
+
+    @property
+    def subject(self):
+        return 'MANUAL MERGE NEEDS TO BE DONE: revision %s by %s from %s' % (
+            self.revision, self.revision.author, self.source)
 
 
 def parse_args(argv):
@@ -135,6 +164,17 @@ def parse_args(argv):
         help='file to store/read record-only revisions.')
     parser.add_option('-v', '--verbose', dest='verbose', action='store_true', help='verbose mode')
     # parser.add_option('-V', '--validation', dest='validation', help='validation script')
+    # email options:
+    parser.add_option('-E', '--send_email', dest='send_email', default='no',
+        help='To email on conflict, set this to "conflict"')
+    parser.add_option('-D', '--email_domain', dest='email_domain',
+        help='The domain name to use for the email. It will be appended to the svn user name.')
+    parser.add_option('-R', '--default_recipients', dest='default_recipients',
+        help='A comma separated list of email recipients.')
+    parser.add_option('-F', '--from_email', dest='from_email', default='noreply',
+        help='Email address for the sender')
+    parser.add_option('-A', '--append_email', dest='append_email_filename',
+        help='path to a text file to append to the body of the conflict email')
 
     # TODO(stephane): options to be implemented:
     # merge subdirs independently as long as no pending conflict is in the same directory.
@@ -224,6 +264,7 @@ def execute_command(
 
 
 class AuthToken(object):
+    """Simple wrapper used to pass username and password around."""
 
     def __init__(self, username, password):
         self.username = username
@@ -361,6 +402,8 @@ class Revision(object):
         if not self.xml_element:
             raise Error('Cannot get data')
         full_msg = self.xml_element.find('msg').text
+        if not full_msg:
+            full_msg = ''
         self._full_msg = full_msg
 
         # Note: Python2.7 supports flags=re.MULTILINE -- stephane
@@ -647,6 +690,7 @@ class Info(object):
 
 
 class SvnWrapper(object):
+    """Class to manage svn calls."""
 
     def __init__(self, auth=None, no_commit=False, verbose=False, stdout=None):
         if stdout is None:
@@ -691,6 +735,106 @@ class SvnWrapper(object):
         return self.run(log_cmd)
 
 
+def add_email_domain(email, domain):
+    """Append the domain name to an email address if it is missing.
+
+    This is probably breaking pure RFC 5322, but should be reliable enough 99.9% of the time.
+    """
+    if not domain:
+        return email
+    if '@' in email:
+        return email
+    at_domain = domain if domain.startswith('@') else '@' + domain
+    if email.endswith(at_domain):
+        return email
+    if email.endswith(at_domain + '>'):
+        return email
+    return email + at_domain
+
+
+class MergeEmail(object):
+    """Small email management class."""
+
+    def __init__(self, send, domain, default_recipients, sender, append_filename):
+        self.send = send.strip() if send else ''
+        self.domain = domain.strip() if domain else ''
+        self._default_recipients = default_recipients
+        self._sender = sender.strip() if sender else ''
+        self._append_filename = append_filename
+        self._append_text = None
+
+    @property
+    def default_recipients(self):
+        if not self._default_recipients:
+            return set()
+        if isinstance(self._default_recipients, types.StringTypes):
+            return set([x.strip() for x in self._default_recipients.split(',') if x and x.strip()])
+        return set(self._default_recipients)
+
+    @property
+    def sender(self):
+        return add_email_domain(self._sender, self.domain)
+
+    def load_append_text(self):
+        """Return the content of the append file."""
+        if not self._append_filename:
+            return ''
+        with open(self._append_filename, 'r') as append_file:
+            return append_file.read()
+
+    def get_append_text(self):
+        """Return the content of the append file if set."""
+        if self._append_text is None:
+            self._append_text = self.load_append_text()
+        return self._append_text
+
+    def recipients_for_conflict(self, conflict):
+        """Generate the list of email recipient for the conflict email.
+
+        Args:
+            conflict: A Conflict() exception.
+
+        Returns:
+            A list of strings, the unique email addresses for the error email.
+        """
+        recipients = self.default_recipients
+        recipients.add(conflict.revision.author)
+        filtered_recipients = set([x for x in [y.strip() for y in recipients if y] if x])
+        return set([add_email_domain(x, self.domain) for x in filtered_recipients])
+
+    def email_conflict(self, conflict):
+        """Send an email about the merge conflict.
+
+        Args:
+            conflict: A Conflict() exception.
+        """
+        if not self.send or self.send == 'no':
+            return
+        subject = conflict.subject
+        body = '%s\n\n%s' % (str(conflict), self.get_append_text())
+        sender = self.sender
+        recipients = self.recipients_for_conflict(conflict)
+        message = (
+            'Subject: %(subject)s\n'
+            'From: %(from)s\n'
+            'To: %(to)s\n'
+            '\n'
+            '%(body)s' % {
+                'subject': subject,
+                'from': sender,
+                'to': ', '.join(recipients),
+                'body': body
+            }
+        )
+
+        try:
+            smtp = smtplib.SMTP('localhost')
+            smtp.sendmail(sender, recipients, message)
+            print 'Successfully sent email from %s to %s' % (sender, ', '.join(recipients))
+        except smtplib.SMTPException:
+            print 'Error: unable to send email'
+
+
 def idle_merge_metacomment(revisions=None, mergeinfo_revisions=None):
     if revisions is None:
         revisions = []
@@ -721,6 +865,7 @@ class IdleMerge(object):
         self.no_merge_patterns = DEFAULT_NO_MERGE_PATTERNS
         self.single = single
         self.concise = False
+        self.mail_handler = None
         self.record_only_filename = None
         self.verbose = verbose
         self.validation_script = None
@@ -757,7 +902,7 @@ class IdleMerge(object):
     def svn_status(self, options=None):
         if options is None:
             options = []
-        self.execute_svn_command(['status', '--xml'] + options + [self.target])
+        self.execute_svn_command(['status', '--ignore-externals', '--xml'] + options + [self.target])
         return Status(xml.etree.ElementTree.fromstring(''.join(self.svn.stdout)))
 
     def svn_resolved(self, victim):
@@ -775,7 +920,7 @@ class IdleMerge(object):
     def svn_update(self):
         print "UPDATE"
         self._info = None
-        return self.execute_svn_command(['update', self.target])
+        return self.execute_svn_command(['update', '--ignore-externals', self.target])
 
     def revert_pristine(self):
         """Revert all pending changes and delete unknown files to get a pristine working copy."""
@@ -1125,9 +1270,8 @@ class IdleMerge(object):
                 raise Error('Not implemented')
         except Conflict as conflict:
             print str(conflict)
-            svn_status = execute_command(['svn', 'status'])
-            print ''.join(svn_status['stdout'])
             self.save_record_only_revisions(conflict.mergeinfos)
+            self.mail_handler.email_conflict(conflict)
             return 1
         print 'Done merging'
         return 0
@@ -1151,6 +1295,7 @@ def extract_additional_patterns(patterns_string):
 
 
 def main(argv):
+    force_line_buffer()
     try:
         options = parse_args(argv)
     except Error:
@@ -1161,12 +1306,18 @@ def main(argv):
     source_url = options.source
     verbose = options.verbose
 
+    mail_handler = MergeEmail(
+        options.send_email, options.email_domain, options.default_recipients, options.from_email,
+        options.append_email_filename
+    )
+
     # validation_script = options.validation
     # additional_patterns = extract_additional_patterns(options.patterns)
 
     idlemerge = IdleMerge(source_url, noop=noop, single=single, verbose=verbose)
     idlemerge.concise = options.concise
     idlemerge.record_only_filename = options.record_only_filename
+    idlemerge.mail_handler = mail_handler
     return idlemerge.launch_merge()
 
 
