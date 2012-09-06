@@ -17,6 +17,7 @@
 #  limitations under the License.
 
 import datetime
+import hashlib
 import os
 import re
 import select
@@ -197,7 +198,9 @@ def parse_args(argv):
 
 
 def execute_command(
-    command, discard_output=False, verbose=False, stdout=None, stderr=None, password=None):
+    command, discard_output=False, verbose=False, stdout=None, stderr=None, password=None,
+    handle_process=True, bufsize=None
+    ):
     """Call a subprocess and handle the stder/stdout.
 
     Args:
@@ -210,11 +213,26 @@ def execute_command(
             Default is sys.stderr.
         password: A string, a password to replace in the command arguments with the %%PASSWORD%%
             pattern. This allows us to hide the password from the verbose output.
+        handle_process: A boolean, if True handle the output and return a dict with the return code
+            and outputs from the process. If False, return the subprocess instance as is .
+            Default is True.
+        bufsize: An integer, passed to subprocess.Popen(), see official Python docs for details.
+            Default is 1.
+
+    Returns:
+        If handle_process is True, default, a dict of 3 items:
+            return_code: and integer, the exit code of the process called.
+            stdout: A list of strings, the stdout lines.
+            stderr: A list of string, the stderr lines.
+        If handle_process is False, the subprocess instance. The caller is in charge of processing
+        the output and closing/terminating the subprocess.
     """
     if stdout is None:
         stdout = sys.stdout
     if stderr is None:
         stderr = sys.stderr
+    if bufsize is None:
+        bufsize = 1
 
     if verbose:
         print >> stdout, '[DEBUG] executing command %r.' % ' '.join(command)
@@ -224,7 +242,9 @@ def execute_command(
     else:
         cmd = command
 
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=bufsize)
+    if not handle_process:
+        return process
 
     stdout_lines = []
     stderr_lines = []
@@ -340,6 +360,12 @@ class Revision(object):
     def __str__(self):
         return str(self.number)
 
+    def __int__(self):
+        return self.number
+
+    def __hash__(self):
+        return self.number
+
     def __cmp__(self, other):
         return cmp(self.number, other.number)
 
@@ -431,7 +457,8 @@ class Revision(object):
 
 
 def revisions_as_string(revisions, separator=', '):
-    return separator.join([str(revision) for revision in revisions])
+    sorted_revisions = sorted([int(revision) for revision in revisions if revision])
+    return separator.join([str(revision) for revision in sorted_revisions])
 
 
 class StatusEntry(object):
@@ -714,7 +741,7 @@ class SvnWrapper(object):
     def stderr(self):
         return self._last_status['stderr'] if self._last_status else None
 
-    def run(self, options, discard_output=False):
+    def run(self, options, discard_output=False, handle_process=True, bufsize=None):
         svn_cmd = ['svn', '--non-interactive']
         password = None
         if self.auth:
@@ -724,11 +751,15 @@ class SvnWrapper(object):
                 svn_cmd += ['--password', '%%PASSWORD%%']
         svn_cmd += options
         self._last_status = None
-        self._last_status = execute_command(
+        command_result = execute_command(
             svn_cmd, discard_output=discard_output, verbose=self.verbose, stdout=self._stdout,
-            password=password
+            password=password, handle_process=handle_process, bufsize=bufsize
         )
-        return self.return_code
+        if handle_process:
+            self._last_status = command_result
+            return self.return_code
+        # We got the command process back
+        return command_result
 
     def log(self, options):
         log_cmd = ['log'] + options
@@ -837,17 +868,19 @@ class MergeEmail(object):
 
 def idle_merge_metacomment(revisions=None, mergeinfo_revisions=None):
     if revisions is None:
-        revisions = []
+        revisions = set()
     if mergeinfo_revisions is None:
-        mergeinfo_revisions = []
+        mergeinfo_revisions = set()
     if type(revisions) is Revision:
-        revisions = [revisions]
+        revisions = set([revisions])
+    else:
+        revisions = set(revisions)
     comment = ['-- IDLEMERGE DATA --']
     if revisions:
         comment.append('REVISIONS=' + revisions_as_string(revisions, ','))
     if mergeinfo_revisions:
         comment.append('MERGEINFO_REVISIONS=' + revisions_as_string(mergeinfo_revisions, ','))
-    all_revisions = sorted(revisions + mergeinfo_revisions)
+    all_revisions = sorted(revisions.union(mergeinfo_revisions))
     comment += ['r%s | %s | %s' % (r.number, r.author, r.date) for r in all_revisions]
     return '\n  '.join(comment)
 
@@ -888,8 +921,9 @@ class IdleMerge(object):
             self.get_svn_info()
         return self._info
 
-    def execute_svn_command(self, command_label):
-        return self.svn.run(command_label, discard_output=False)
+    def execute_svn_command(self, command_label, handle_process=True, bufsize=None):
+        return self.svn.run(
+            command_label, discard_output=False, handle_process=handle_process, bufsize=bufsize)
 
     def revert(self, options=None):
         if options is None:
@@ -902,7 +936,8 @@ class IdleMerge(object):
     def svn_status(self, options=None):
         if options is None:
             options = []
-        self.execute_svn_command(['status', '--ignore-externals', '--xml'] + options + [self.target])
+        self.execute_svn_command(
+            ['status', '--ignore-externals', '--xml'] + options + [self.target])
         return Status(xml.etree.ElementTree.fromstring(''.join(self.svn.stdout)))
 
     def svn_resolved(self, victim):
@@ -1021,22 +1056,22 @@ class IdleMerge(object):
     #    side="source-left"
     #    kind="file"
     #    path-in-repos="stephane/branches/stable/merge_file"
-    #    repos-url="svn+ssh://svn.idle-games.com/var/svn/sandbox"
+    #    repos-url="svn+ssh://svn/sandbox"
     #    revision="484"/>
     # <version
     #    side="source-right"
     #    kind="file"
     #    path-in-repos="stephane/branches/stable/merge_file"
-    #    repos-url="svn+ssh://svn.idle-games.com/var/svn/sandbox"
+    #    repos-url="svn+ssh://svn/sandbox"
     #    revision="485"/>
     # </tree-conflict>
     # </entry>
     # </info>
 
-    def resolve_tree_conflict(self, tree_conflict):
+    def resolve_tree_conflict(self, revision, victim_path, tree_conflict):
         """Resolve a tree conflict on simple cases.
 
-        A tree conflict section looks like this:
+        A tree conflict section for double delete looks like this:
             <tree-conflict
                     operation="merge"
                     kind="file"
@@ -1047,44 +1082,128 @@ class IdleMerge(object):
                     side="source-left"
                     kind="file"
                     path-in-repos="stephane/branches/stable/merge_file"
-                    repos-url="svn+ssh://svn.idle-games.com/var/svn/sandbox"
+                    repos-url="svn+ssh://svn/sandbox"
                     revision="484"/>
                 <version
                     side="source-right"
                     kind="file"
                     path-in-repos="stephane/branches/stable/merge_file"
-                    repos-url="svn+ssh://svn.idle-games.com/var/svn/sandbox"
+                    repos-url="svn+ssh://svn/sandbox"
                     revision="485"/>
+            </tree-conflict>
+
+        A tree conflict for a double add might look like this:
+            <tree-conflict
+                    kind="file"
+                    reason="add"
+                    victim="mudling.jpg"
+                    action="add"
+                    operation="merge">
+                <version
+                        side="source-left"
+                        kind="file"
+                        path-in-repos="stephane/branches/stable/mudling.jpg"
+                        repos-url="svn+ssh://svn/sandbox"
+                        revision="632"/>
+                <version
+                        revision="633"
+                        side="source-right"
+                        kind="file"
+                        path-in-repos="stephane/branches/stable/mudling.jpg"
+                        repos-url="svn+ssh://svn/sandbox"/>
             </tree-conflict>
         """
         tc_attrib = tree_conflict.attrib
         action = tc_attrib['action']
         reason = tc_attrib['reason']
-        victim = tree_conflict.attrib['victim']
         if action == 'delete' and reason == 'delete':
-            if not self.svn_resolved(victim):
-                print 'Resolved double delete conflict on %s' % victim
+            if not self.svn_resolved(victim_path):
+                print 'Resolved double delete conflict on %s' % victim_path
                 return False
             return True
+        if action == 'add' and reason == 'add':
+            return self.resolve_double_add(revision, victim_path, tree_conflict)
         if tc_attrib['action'] == 'delete' and tc_attrib['reason'] == 'edit':
             print 'Incoming delete but %s has been updated since last merge.' % victim
             return True
-        print 'Conflict type not handled: action=%s, reason=%s on %s' % (action, reason, victim)
+        print 'Conflict type not handled: action=%s, reason=%s on %s' % (
+            action, reason, victim_path)
         return True
+
+    def resolve_double_add(self, revision, victim_path, tree_conflict):
+        """Resolve double add conflicts.
+
+        Args:
+            revision: A Revision() instance the the revision currently being merged.
+            victim_path: A string, the local path to the target of the conflict.
+            tree_conflict: An xml.etree.ElementTree instance representing a <tree-conflict> section
+                from 'svn info --xml '.
+
+        Returns:
+            True if the conflict was not resolved, False if resolved.
+        """
+        tc_attrib = tree_conflict.attrib
+        kind = tc_attrib['kind']
+        if kind == 'dir':
+            # directories might contain mismatching files, so we would need to implement a
+            # recursive autoresolver for that.
+            print 'Double add conflict on svn dir %s is not implemented yet' % kind
+            return True
+        if kind != 'file':
+            print 'Double add conflict on svn kind %s is not implemented yet' % kind
+            return True
+        source_depot_path = '^/' + tree_conflict.find('version').attrib['path-in-repos']
+        source_md5 = self.get_remote_md5(source_depot_path, revision.number)
+        if not source_md5:
+            return True
+        victim_md5 = self.get_remote_md5(victim_path)
+        if not victim_md5 or victim_md5 != source_md5:
+            return True
+        # resolve ... svn makes it hard, for some reason
+        print '%s and %s@%s have same %s md5 sum, auto resovling' % (
+            victim_path, source_depot_path, revision, victim_md5)
+        return self.svn_resolved(victim_path)
+
+    def get_remote_md5(self, target_path, revision='HEAD'):
+        """Get the md5 sum for a file in the repo.
+
+        Note that we should stream the file content and run the md5sum as we go since the file
+        could be several GB and we would probably crash if we were to try to store such a large
+        file. Storing to disc is not really useful either since it would increase io useage.
+
+        Args:
+            target_path: A string, svn path for the target in the repo. i.e.: ^/trunk/some/file.
+            revision: A string or integer, the revision for the file.
+
+        Returns:
+            A string, the md5sum for the file.
+        """
+        # bufsize -1 to be passed to subprocess.Popen(), this will let us use the default buffer
+        # size which is good enough for 'streaming' binaries to get their md5 sum.
+        svn_cat = self.execute_svn_command(
+            ['cat', '-r', str(revision), target_path], handle_process=False, bufsize=-1)
+        md5_hash = hashlib.md5()
+        for data in svn_cat.stdout:
+            md5_hash.update(data)
+        if svn_cat.wait():
+            print 'Failed to get md5 sum for %s@%s' % (target_path, revision)
+            return None
+        return md5_hash.hexdigest()
 
     def resolve_conflict(self, revision, conflict):
         """Resolve a conflict in the specific revision.
 
         Args:
             revision: A Revision() instance the the revision currently being merged.
-            conflict: A StatusEntry() instance for the current conflict to handle."""
-        target = conflict.path
-        self.execute_svn_command(['info', '--xml', target])
+            conflict: A StatusEntry() instance for the current conflict to handle.
+        """
+        victim_path = conflict.path
+        self.execute_svn_command(['info', '--xml', victim_path])
         info = Info(xml.etree.ElementTree.fromstring(''.join(self.svn.stdout)))
         info_entry = info.entries[0]
         tree_conflict = info_entry.tree_conflict
         if tree_conflict:
-            return self.resolve_tree_conflict(tree_conflict)
+            return self.resolve_tree_conflict(revision, victim_path, tree_conflict)
         return True
 
     def resolve_conflicts(self, revision):
@@ -1177,19 +1296,19 @@ class IdleMerge(object):
             commit_mergeinfo: A boolean, when set will force the commit even if a true merge or
                 conflict is not reached. Default is False.
         """
-        
         print 'Merging one by one, concise mode'
         record_only_revisions = self.load_record_only_revisions()
         if record_only_revisions:
             print 'Found %d revisions to record-only from previous run: %s' % (
                 len(record_only_revisions), revisions_as_string(record_only_revisions))
+            record_only_revisions = record_only_revisions.intersection(set(revisions))
         merged_paths = set(self.target)
         revisions_to_merge = revisions[:]
-        mergeinfo_revisions = []
+        mergeinfo_revisions = set()
         while revisions_to_merge:
             print '=====> Merging: ' + revisions_as_string(revisions_to_merge)
             merged = []
-            mergeinfo_revisions = []
+            mergeinfo_revisions = set()
             for revision in revisions_to_merge:
                 if self.is_no_merge_revision(revision, record_only_revisions):
                     self.merge_record_only([revision])
@@ -1200,25 +1319,31 @@ class IdleMerge(object):
                 status = self.svn_status()
                 if status.has_conflict:
                     raise Conflict(
-                        revision=revision, mergeinfos=mergeinfo_revisions, source=self.source)
+                        revision=revision,
+                        mergeinfos=mergeinfo_revisions.union(record_only_revisions),
+                        source=self.source
+                    )
                 if status.has_non_props_changes():
-                    merged = mergeinfo_revisions + [revision]
+                    merged = mergeinfo_revisions.copy()
+                    merged.add(revision)
                     commit_log = self.commit_log(revision, mergeinfo_revisions)
                     print commit_log
                     self.commit(['-m', commit_log])
                     if not self.svn.return_code:
-                        mergeinfo_revisions = []
+                        mergeinfo_revisions = set()
                     break
-                mergeinfo_revisions.append(revision)
-            if mergeinfo_revisions == revisions_to_merge:
+                mergeinfo_revisions.add(revision)
+            if mergeinfo_revisions == set(revisions_to_merge):
                 if commit_mergeinfo:
                     Error('Not implemented')
                 else:
                     print '=====> Only empty svn:mergeinfo to merge, skipping: %s' % ','.join([
                         str(r) for r in revisions_to_merge])
-                    self.save_record_only_revisions(mergeinfo_revisions)
+                    self.save_record_only_revisions(
+                        mergeinfo_revisions.union(record_only_revisions))
                     return None
             revisions_to_merge = [r for r in revisions_to_merge if r not in merged]
+        # Whole pass completed, nothing left pending to merge
         self.save_record_only_revisions(mergeinfo_revisions)
         return None
 
@@ -1233,13 +1358,15 @@ class IdleMerge(object):
 
     def load_record_only_revisions(self):
         if not self.record_only_filename or not os.path.exists(self.record_only_filename):
-            return []
+            return set()
         with open(self.record_only_filename, 'r') as records_file:
-            revisions = []
+            revisions = set()
             for line in records_file:
-                revisions += [Revision(r.strip()) for r in line.split(',') if r.strip()]
-            revisions.sort()
-            return revisions
+                revisions = revisions.union(set([
+                    Revision(r.strip()) for r in line.split(',') if r.strip()]))
+        if revisions:
+            print 'Revisions to skip from record_only file: %s' % revisions_as_string(revisions)
+        return revisions
 
     def save_record_only_revisions(self, revisions):
         if not self.record_only_filename:
