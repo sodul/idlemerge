@@ -1124,7 +1124,7 @@ class IdleMerge(object):
         if action == 'add' and reason == 'add':
             return self.resolve_double_add(revision, victim_path, tree_conflict)
         if tc_attrib['action'] == 'delete' and tc_attrib['reason'] == 'edit':
-            print 'Incoming delete but %s has been updated since last merge.' % victim
+            print 'Incoming delete but %s has been updated since last merge.' % victim_path
             return True
         print 'Conflict type not handled: action=%s, reason=%s on %s' % (
             action, reason, victim_path)
@@ -1184,7 +1184,7 @@ class IdleMerge(object):
             ['cat', '-r', str(revision), target_path], handle_process=False, bufsize=-1)
         md5_hash = hashlib.md5()
         for data in svn_cat.stdout:
-            md5_hash.update(data)
+            md5_hash.update(data)   # pylint: disable=E1101
         if svn_cat.wait():
             print 'Failed to get md5 sum for %s@%s' % (target_path, revision)
             return None
