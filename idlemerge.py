@@ -175,7 +175,11 @@ def parse_args(argv):
     parser.add_option('-F', '--from_email', dest='from_email', default='noreply',
         help='Email address for the sender')
     parser.add_option('-A', '--append_email', dest='append_email_filename',
-        help='path to a text file to append to the body of the conflict email')
+        help='Path to a text file to append to the body of the conflict email')
+    parser.add_option('-i', '--ignore', dest='ignore',
+        help='A comma separated list of files to not merge, usually branch specific files'
+        ' such as pom.xml. Each entry is a relative path in the branch.'
+    )
 
     # TODO(stephane): options to be implemented:
     # merge subdirs independently as long as no pending conflict is in the same directory.
@@ -902,6 +906,7 @@ class IdleMerge(object):
         self.record_only_filename = None
         self.verbose = verbose
         self.validation_script = None
+        self.ignore = ()
         # self.authentication = False
         # self.username = None
         # self.password = None
@@ -1007,7 +1012,13 @@ class IdleMerge(object):
             print >> self._stdout, ' Executing %r failed !\n' % command
             print >> self._stdout, self.svn.stderr
             return False
+        self.revert_files_to_ignore()
         return True
+
+    def revert_files_to_ignore(self):
+        if not self.ignore:
+            return
+        self.execute_svn_command(['revert'] + [os.path.join(self.target, x) for x in self.ignore])
 
     def commit(self, options=None):
         if options is None:
@@ -1445,6 +1456,7 @@ def main(argv):
     idlemerge.concise = options.concise
     idlemerge.record_only_filename = options.record_only_filename
     idlemerge.mail_handler = mail_handler
+    idlemerge.ignore = options.ignore.split(',') if options.ignore else ()
     return idlemerge.launch_merge()
 
 
