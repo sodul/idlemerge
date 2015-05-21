@@ -78,7 +78,7 @@ DEFAULT_NO_MERGE_PATTERNS = (
 # -- IDLEMERGE DATA --
 #   REVISIONS=1234
 #   MERGEINFO_REVISIONS=1230,1233
-# 
+#
 # merge revisions r1235,1236 from ^/x to ^/bar
 #   -- IDLEMERGE DATA --
 #   REVISIONS=1235,1236
@@ -123,7 +123,34 @@ class Conflict(Error):
                 'Pending record-only merges: ' + revisions_as_string(self.mergeinfos))
         if self.merges:
             message_lines.append('Pending clean merges: ' + revisions_as_string(self.merges))
-        return '\n'.join(message_lines + self.status)
+
+        conflict_files = []
+        merged_files = []
+        for line in self.status:
+            match = re.match(r'C\s+(.*\w)$', line)
+            if match:
+                conflict_files.append(match.group(1))
+                continue
+            match = re.match(r'[ ]?M\s+(.*\w)$', line)
+            if match:
+                merged_files.append(match.group(1))
+
+        resolve_lines = [
+            '\nTo resolve:',
+            '$ cd %s  # or your own working copy equivalent' % self.target,
+            '$ svn up',
+            '$ svn st',
+            '# make sure that none of these files '
+            'have pending changes: %s' % (' '.join(conflict_files + merged_files)),
+            '$ svn merge -c %s --accept postpone  %s' % (self.revision.number, self.source),
+            '$ svn st',
+            '# resolve the conflicted files, '
+            'stay directly in the base directory of the branch to commit',
+            '$ svn commit . %s' % (' '.join(conflict_files + merged_files)),
+            '# Note that the dot is important to commit since '
+            'it contains the svn:mergeinfo metadata required for idlemerge to work properly.'
+        ]
+        return '\n'.join(message_lines + self.status + resolve_lines)
 
     @property
     def status(self):
@@ -246,7 +273,8 @@ def execute_command(
     else:
         cmd = command
 
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=bufsize)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, bufsize=bufsize)
     if not handle_process:
         return process
 
@@ -1263,7 +1291,7 @@ class IdleMerge(object):
 # -- IDLEMERGE DATA --
 #   REVISIONS=1234
 #   MERGEINFO_REVISIONS=1230,1233
-# 
+#
 # merge revisions r1235,1236 from ^/x to ^/bar
 #   -- IDLEMERGE DATA --
 #   REVISIONS=1235,1236
@@ -1332,7 +1360,8 @@ class IdleMerge(object):
                     raise Conflict(
                         revision=revision,
                         mergeinfos=mergeinfo_revisions.union(record_only_revisions),
-                        source=self.source
+                        source=self.source,
+                        target=self.target
                     )
                 if status.has_non_props_changes():
                     merged = mergeinfo_revisions.copy()
