@@ -127,7 +127,7 @@ class Conflict(Error):
         conflict_files = []
         merged_files = []
         for line in self.status:
-            match = re.match(r'C\s+(.*\w)$', line)
+            match = re.match(r'(?:!\s+C|C)\s+(.*\w)$', line)
             if match:
                 conflict_files.append(match.group(1))
                 continue
