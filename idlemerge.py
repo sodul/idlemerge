@@ -397,6 +397,7 @@ class Revision(object):
         self._full_msg = None
         self._idle_data = None
         self._paths = None
+        self._original_branch = None
 
     def __str__(self):
         return str(self.number)
@@ -483,6 +484,33 @@ class Revision(object):
         if self._paths is None:
             self._paths = [LogPath(x) for x in self.xml_element.find('paths')]
         return self._paths
+
+    @property
+    def original_branch(self):
+        if self._original_branch is None:
+            self._original_branch = self._get_original_branch()
+        return self._original_branch
+
+    def _get_original_branch(self):
+        match = re.match(r'(\^.*)/(?:trunk|branches/\w+)$', self.branch)
+        if not match:
+            return self.branch
+        project_path = match.group(1)
+        potential_path = ''
+        for log_path in self.paths:
+            this_path = '^' + log_path.path
+            if not this_path.startswith('^/'):
+                continue
+            if this_path.startswith(self.branch):
+                return self.branch
+            if this_path.startswith(project_path):
+                potential_path = this_path
+        if not potential_path:
+            return self.branch
+        match = re.match(r'(\^/.*(?:/trunk|/branches/\w+))(?:/|$)', potential_path)
+        if not match:
+            return self.branch
+        return match.group(1)
 
     def _delete_properties(self):
         self._xml = None
@@ -1036,8 +1064,10 @@ class IdleMerge(object):
         if type(revisions) is Revision:
             revisions = [revisions]
         revisions_string = ','.join([str(revision.number) for revision in revisions])
+        original_branch = revisions[-1].original_branch
         command = ['--accept', merge_option, 'merge', '-c', revisions_string,
-            self.source, self.target]
+             '%s@%s' % (original_branch, str(revisions[-1].number)), self.target]
+        print '> svn', ' '.join(command)
         for _ in range(3):
             return_code = self.execute_svn_command(command)
             err_line = self.svn.stderr[0] if self.svn.stderr else ''
@@ -1062,6 +1092,7 @@ class IdleMerge(object):
             options = []
         if self.noop:
             print 'NOOP: commit'
+            self.revert_all()
             return 0
         self.execute_svn_command(['commit'] + options + [self.target])
         print ''.join(self.svn.stdout)
@@ -1266,12 +1297,14 @@ class IdleMerge(object):
                 conflicted += 1
         return conflicted
 
-    def get_source_sub_path(self, path):
-        match = re.match(r'\^?(/.*?)/?(?:@.*)?$', self.source)
+    def get_source_sub_path(self, path, original_path=None):
+        if original_path is None:
+            original_path = self.source
+        match = re.match(r'\^?(/.*?)/?(?:@.*)?$', original_path)
         if match:
             source = match.group(1) + '/'
         else:
-            source = self.source
+            source = original_path
         if path.startswith(source):
             return path[len(source):]
         return path
@@ -1279,7 +1312,7 @@ class IdleMerge(object):
     def revert_spurious_merges(self, revision, valid_entries=()):
         no_revert = set(valid_entries)
         for path_item in revision.paths:
-            no_revert.add(self.get_source_sub_path(path_item.path))
+            no_revert.add(self.get_source_sub_path(path_item.path, revision.original_branch))
         status = self.svn_status()
         to_revert = []
         for entry in status.entries:
