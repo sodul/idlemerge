@@ -231,6 +231,8 @@ def parse_args(argv):
         help='file to store/read record-only revisions.')
     parser.add_option('-v', '--verbose', dest='verbose', action='store_true', help='verbose mode')
     # parser.add_option('-V', '--validation', dest='validation', help='validation script')
+    parser.add_option('-M', '--commit_mergeinfo', dest='commit_mergeinfo', action='store_true',
+        help='Commit mergeinfo-only merges even if no other changes are found')
     # email options:
     parser.add_option('-E', '--send_email', dest='send_email', default='no',
         help='To email on conflict, set this to "conflict"')
@@ -986,13 +988,15 @@ def idle_merge_metacomment(revisions=None, mergeinfo_revisions=None):
 
 class IdleMerge(object):
 
-    def __init__(self, source, target='.', noop=True, single=False, verbose=False, stdout=None):
+    def __init__(self, source, target='.', noop=True, single=False, verbose=False, stdout=None,
+                 commit_mergeinfo=False):
         if stdout is None:
             stdout = sys.stdout
         self.source = source
         self.target = target
         self._target_url = None
         self._stdout = stdout
+        self.commit_mergeinfo = commit_mergeinfo
         self.noop = noop
         self.no_merge_patterns = DEFAULT_NO_MERGE_PATTERNS
         self.single = single
@@ -1388,6 +1392,8 @@ class IdleMerge(object):
             message = self.single_revision_message(revisions[0])
         elif not revisions and len(mergeinfo_revisions) == 1:
             message = self.single_revision_message(mergeinfo_revisions[0], True)
+        elif not revisions and len(mergeinfo_revisions) > 1:
+            message = '[automerge %s] Committing mergeinfo changes' % self.source
         else:
             message = 'merge revisions %s from %s to %s' % (
                 revisions_as_string(revisions), self.source, self.target_url)
@@ -1447,7 +1453,13 @@ class IdleMerge(object):
                 mergeinfo_revisions.add(revision)
             if mergeinfo_revisions == set(revisions_to_merge):
                 if commit_mergeinfo:
-                    Error('Not implemented')
+                    merged = mergeinfo_revisions.copy()
+                    commit_log = self.commit_log(mergeinfo_revisions=mergeinfo_revisions)
+                    print commit_log
+                    self.commit(['-m', commit_log])
+                    if not self.svn.return_code:
+                        mergeinfo_revisions = set()
+                    break
                 else:
                     print '=====> Only empty svn:mergeinfo to merge, skipping: %s' % ','.join([
                         str(r) for r in revisions_to_merge])
@@ -1502,7 +1514,7 @@ class IdleMerge(object):
         try:
             if self.single:
                 if self.concise:
-                    self.merge_one_by_one_concise(revisions)
+                    self.merge_one_by_one_concise(revisions, self.commit_mergeinfo)
                 else:
                     self.merge_one_by_one(revisions)
             else:
@@ -1540,6 +1552,7 @@ def main(argv):
     except Error:
         return 1
 
+    commit_mergeinfo = options.commit_mergeinfo
     noop = options.noop
     single = options.single
     source_url = options.source
@@ -1553,7 +1566,8 @@ def main(argv):
     # validation_script = options.validation
     # additional_patterns = extract_additional_patterns(options.patterns)
 
-    idlemerge = IdleMerge(source_url, noop=noop, single=single, verbose=verbose)
+    idlemerge = IdleMerge(source_url, noop=noop, single=single, verbose=verbose,
+        commit_mergeinfo=commit_mergeinfo)
     idlemerge.concise = options.concise
     idlemerge.record_only_filename = options.record_only_filename
     idlemerge.mail_handler = mail_handler
