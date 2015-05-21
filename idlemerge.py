@@ -126,6 +126,8 @@ class Conflict(Error):
 
         conflict_files = []
         merged_files = []
+        added_files = []
+        deleted_files = []
         for line in self.status:
             match = re.match(r'(?:!\s+C|C)\s+(.*\w)$', line)
             if match:
@@ -134,6 +136,12 @@ class Conflict(Error):
             match = re.match(r'[ ]?M\s+(.*\w)$', line)
             if match:
                 merged_files.append(match.group(1))
+            match = re.match(r'[ ]?A\s+\+\s+(.*\w)$', line)
+            if match:
+                added_files.append(match.group(1))
+            match = re.match(r'[ ]?D\s+(.*\w)$', line)
+            if match:
+                deleted_files.append(match.group(1))
 
         resolve_lines = [
             '\nTo resolve:',
@@ -146,7 +154,8 @@ class Conflict(Error):
             '$ svn st',
             '# resolve the conflicted files, '
             'stay directly in the base directory of the branch to commit',
-            '$ svn commit -N . %s' % (' '.join(conflict_files + merged_files)),
+            '$ svn commit -N . %s'
+                % (' '.join(conflict_files + merged_files + added_files + deleted_files)),
             '# Note that the dot is important to commit since '
             'it contains the svn:mergeinfo metadata required for idlemerge to work properly.'
         ]
