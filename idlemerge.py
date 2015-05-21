@@ -72,6 +72,25 @@ Downsides are:
 DEFAULT_NO_MERGE_PATTERNS = (
     'maven-release-plugin', 'NOMERGE', 'NO-MERGE', 'NO MERGE', 'NO_MERGE')
 
+BIG_MUST_READ = """
+  __  __ _    _  _____ _______   _____  ______          _____  _ _ _ 
+ |  \/  | |  | |/ ____|__   __| |  __ \|  ____|   /\   |  __ \| | | |
+ | \  / | |  | | (___    | |    | |__) | |__     /  \  | |  | | | | |
+ | |\/| | |  | |\___ \   | |    |  _  /|  __|   / /\ \ | |  | | | | |
+ | |  | | |__| |____) |  | |    | | \ \| |____ / ____ \| |__| |_|_|_|
+ |_|  |_|\____/|_____/   |_|    |_|  \_\______/_/    \_\_____/(_|_|_)
+"""
+
+END_BIG_MUST_READ = """
+      ____  __ _    _  _____ _______   _____  ______          _____  _ _ _ 
+     / /  \/  | |  | |/ ____|__   __| |  __ \|  ____|   /\   |  __ \| | | |
+    / /| \  / | |  | | (___    | |    | |__) | |__     /  \  | |  | | | | |
+   / / | |\/| | |  | |\___ \   | |    |  _  /|  __|   / /\ \ | |  | | | | |
+  / /  | |  | | |__| |____) |  | |    | | \ \| |____ / ____ \| |__| |_|_|_|
+ /_/   |_|  |_|\____/|_____/   |_|    |_|  \_\______/_/    \_\_____/(_|_|_)
+"""
+
+
 # Sample merge logs:
 # [automerge ^/branches/prod@1234] Original comment for the revision
 #   on multiple lines
@@ -143,21 +162,32 @@ class Conflict(Error):
             if match:
                 deleted_files.append(match.group(1))
 
+        target = self.target
+        source = self.source
         resolve_lines = [
-            '\nTo resolve:',
-            '$ cd %s  # or your own working copy equivalent' % self.target,
+            '',
+            BIG_MUST_READ,
+            ''
+            'To resolve use the official subversion command line client.:',
+            'Do not use a GUI client such as Eclipse or TortoiseSVN for any of the steps.',
+            'If you use them, even to commit the merge metada will be skipped breaking idlemerge.',
+            'You must be in the target branch not in the %s branch' % (source,),
+            '$ cd %s # or your own working copy equivalent of the *target* branch' % (target,),
             '$ svn up',
             '$ svn st',
             '# make sure that none of these files '
             'have pending changes: %s' % (' '.join(conflict_files + merged_files)),
-            '$ svn merge -c %s --accept postpone  %s' % (self.revision.number, self.source),
+            '$ svn merge -c %s --accept postpone  %s' % (self.revision.number, source),
             '$ svn st',
             '# resolve the conflicted files, '
             'stay directly in the base directory of the branch to commit',
             '$ svn commit -N . %s'
                 % (' '.join(conflict_files + merged_files + added_files + deleted_files)),
             '# Note that the dot is important to commit since '
-            'it contains the svn:mergeinfo metadata required for idlemerge to work properly.'
+            'it contains the svn:mergeinfo metadata required for idlemerge to work properly.',
+            '',
+            END_BIG_MUST_READ,
+            ''
         ]
         return '\n'.join(message_lines + self.status + resolve_lines)
 
