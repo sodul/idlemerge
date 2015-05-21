@@ -146,7 +146,7 @@ class Conflict(Error):
             '$ svn st',
             '# resolve the conflicted files, '
             'stay directly in the base directory of the branch to commit',
-            '$ svn commit . %s' % (' '.join(conflict_files + merged_files)),
+            '$ svn commit -N . %s' % (' '.join(conflict_files + merged_files)),
             '# Note that the dot is important to commit since '
             'it contains the svn:mergeinfo metadata required for idlemerge to work properly.'
         ]
